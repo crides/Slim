@@ -877,26 +877,26 @@ int accept4(int socket, struct sockaddr *addr, socklen_t *addrlen, int flags)
 
 int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
 {
+    struct timespec start;
+    struct timespec end;
+    double elapsed_time = 0;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     GLOBAL_LOCK;
     if (debug_flag) {
         printf("connect(%d, %s, %hu)\n", socket, inet_ntoa(((struct sockaddr_in*)addr)->sin_addr), htons(((struct sockaddr_in*)addr)->sin_port));
         fflush(stdout);
     }
-
     if (fd_get_type(socket) == fd_normal) {
         GLOBAL_UNLOCK;
         return real_socket.connect(socket, addr, addrlen);
     }
-
     int overlay_fd = fd_get_overlay_fd(socket);
-
     // connect to outside overlay, simply return
     if (!is_on_overlay((struct sockaddr_in*)addr)) {
         log_error("connect() to outside overlay.\n");
         GLOBAL_UNLOCK;
         return real_socket.connect(overlay_fd, addr, addrlen);
     }
-
     // connect to overlay, we first clear the non-blocking bit
     int original_flags = real_socket.fcntl(overlay_fd, F_GETFL);
     real_socket.fcntl(overlay_fd, F_SETFL, original_flags & ~O_NONBLOCK);
@@ -907,7 +907,6 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
         GLOBAL_UNLOCK;
         return -1;
     }
-
     // connect to overlay peer
     struct sockaddr_in host_addr;
     host_addr.sin_family = AF_INET;
@@ -919,15 +918,12 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
         return -1;
     }
     sscanf(buffer, "%u:%hu", &(host_addr.sin_addr.s_addr), &(host_addr.sin_port));
-
     // set the flags back
     real_socket.fcntl(overlay_fd, F_SETFL, original_flags);
-
     if (debug_flag) {
         printf("HOST connect(%d, %s, %hu)\n", socket, inet_ntoa(host_addr.sin_addr), htons(host_addr.sin_port));
         fflush(stdout);
     }
-
     // communicate with router
     int n, unix_sock = connect_router();
     if (unix_sock < 0) {
@@ -935,7 +931,6 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
         GLOBAL_UNLOCK;
         return -1;
     }
-
     struct FfrRequestHeader req_header;
     req_header.func = SOCKET_CONNECT;
     req_header.body_size = sizeof(struct SOCKET_CONNECT_REQ);
@@ -949,7 +944,6 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
         GLOBAL_UNLOCK;
         return -1;
     }
-
     struct SOCKET_CONNECT_REQ req_body;
     req_body.host_addr = host_addr;
     req_body.host_addrlen = sizeof(host_addr);
@@ -967,7 +961,6 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
         return -1;
     }
 #endif
-
     int bytes = 0, rsp_size = sizeof(struct SOCKET_CONNECT_RSP);
     struct SOCKET_CONNECT_RSP rsp;
     while(bytes < rsp_size) {
@@ -980,9 +973,7 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
         }
         bytes = bytes + n;
     }
-
     real_socket.close(unix_sock);
-
     if (rsp.ret < 0) {
         if (rsp.ret != -EINPROGRESS) {
             errno = -rsp.ret;
@@ -991,7 +982,6 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
             return -1;
         }
     }
-
     // we overwrite the socket fd mapping
     int host_fd = fd_get_host_fd(socket);
     if (socket != host_fd) {
@@ -1004,18 +994,18 @@ int connect(int socket, const struct sockaddr *addr, socklen_t addrlen)
             fd_to_epoll_fd[overlay_fd] = 0;
             epoll_events[new_overlay_fd] = epoll_events[overlay_fd];
         }
-
         real_socket.close(host_fd);
         fd_store(socket, new_overlay_fd, socket, -1);
     }
-
     if (rsp.ret < 0) {
         errno = -rsp.ret;
         GLOBAL_UNLOCK;
         return -1;
     }
-
     GLOBAL_UNLOCK;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    elapsed_time = (double)(end.tv_sec - start.tv_sec) + (double)(end.tv_nsec -	start.tv_nsec)/1.0e9;
+    fprintf(stderr, "Connection setup time: %lf seconds\n", elapsed_time);
     return rsp.ret;
 }
 
